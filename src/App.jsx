@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
+import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const MATERIALS = ["PLA", "PETG", "ABS", "TPU", "ASA", "Nylon"];
@@ -68,14 +70,15 @@ function analyzeGeometry(fileName, fileSize) {
   };
 }
 
-// ─── 3D PREVIEW (Three.js parametric model) ──────────────────────────────────
-function ModelViewer({ analysisData, rotating }) {
+// ─── 3D PREVIEW — renders actual uploaded STL ────────────────────────────────
+function ModelViewer({ stlFile, rotating }) {
   const mountRef = useRef(null);
-  const sceneRef = useRef({});
+  const rotatingRef = useRef(rotating);
+  useEffect(() => { rotatingRef.current = rotating; }, [rotating]);
 
   useEffect(() => {
     const el = mountRef.current;
-    if (!el) return;
+    if (!el || !stlFile) return;
     const W = el.clientWidth, H = el.clientHeight;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -85,107 +88,116 @@ function ModelViewer({ analysisData, rotating }) {
     el.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 1000);
-    camera.position.set(3, 2.5, 4);
-    camera.lookAt(0, 0, 0);
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 5000);
+
+    // Orbit controls — mouse drag to rotate/zoom
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.autoRotate = false;
 
     // Lights
-    const amb = new THREE.AmbientLight(0x334455, 0.8);
-    scene.add(amb);
-    const dir = new THREE.DirectionalLight(0xffa040, 1.6);
-    dir.position.set(4, 8, 4);
+    scene.add(new THREE.AmbientLight(0x334455, 1.0));
+    const dir = new THREE.DirectionalLight(0xffa040, 2.0);
+    dir.position.set(200, 400, 200);
     dir.castShadow = true;
     scene.add(dir);
-    const fill = new THREE.DirectionalLight(0x2244ff, 0.4);
-    fill.position.set(-4, -2, -4);
+    const fill = new THREE.DirectionalLight(0x2255ff, 0.5);
+    fill.position.set(-200, -100, -200);
     scene.add(fill);
+    const top = new THREE.DirectionalLight(0xffffff, 0.4);
+    top.position.set(0, 500, 0);
+    scene.add(top);
 
-    // Grid
-    const grid = new THREE.GridHelper(6, 12, 0x223344, 0x1a2a38);
-    grid.position.y = -1;
-    scene.add(grid);
+    // Load actual STL
+    const loader = new STLLoader();
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const geometry = loader.parse(e.target.result);
+      geometry.computeVertexNormals();
 
-    // Build a parametric "technical part" shape
-    const group = new THREE.Group();
+      // Center and scale to fit view
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox;
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      geometry.translate(-center.x, -center.y, -center.z);
 
-    // Base block
-    const baseGeo = new THREE.BoxGeometry(1.6, 0.3, 1.4);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x1a4060, roughness: 0.35, metalness: 0.6,
-      emissive: 0x0a1828, emissiveIntensity: 0.3
-    });
-    const baseMesh = new THREE.Mesh(baseGeo, mat);
-    baseMesh.position.y = -0.85;
-    baseMesh.castShadow = true;
-    group.add(baseMesh);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const scale = 200 / maxDim;
 
-    // Central tower
-    const towerGeo = new THREE.CylinderGeometry(0.3, 0.38, 1.4, 32);
-    const towerMesh = new THREE.Mesh(towerGeo, new THREE.MeshStandardMaterial({
-      color: 0x1e5070, roughness: 0.3, metalness: 0.65, emissive: 0x0a2030
-    }));
-    towerMesh.position.y = 0;
-    towerMesh.castShadow = true;
-    group.add(towerMesh);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x1a6080,
+        roughness: 0.3,
+        metalness: 0.7,
+        emissive: 0x051520,
+        emissiveIntensity: 0.4,
+      });
+      const mesh = new THREE.Mesh(geometry, mat);
+      mesh.scale.setScalar(scale);
+      mesh.castShadow = true;
 
-    // Top flange
-    const flangeGeo = new THREE.CylinderGeometry(0.55, 0.32, 0.18, 32);
-    const flangeMesh = new THREE.Mesh(flangeGeo, new THREE.MeshStandardMaterial({
-      color: 0xff8800, roughness: 0.2, metalness: 0.8, emissive: 0x221100
-    }));
-    flangeMesh.position.y = 0.79;
-    group.add(flangeMesh);
+      // Wireframe overlay
+      const wfMat = new THREE.MeshBasicMaterial({
+        color: 0x00ccff, wireframe: true, transparent: true, opacity: 0.08,
+      });
+      const wfMesh = new THREE.Mesh(geometry, wfMat);
+      wfMesh.scale.setScalar(scale);
 
-    // Holes / bolts
-    for (let i = 0; i < 4; i++) {
-      const ang = (i / 4) * Math.PI * 2;
-      const boltGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.35, 12);
-      const boltMesh = new THREE.Mesh(boltGeo, new THREE.MeshStandardMaterial({
-        color: 0x8899aa, roughness: 0.3, metalness: 0.9
-      }));
-      boltMesh.position.set(Math.cos(ang) * 0.62, -0.68, Math.sin(ang) * 0.52);
-      group.add(boltMesh);
-    }
+      const group = new THREE.Group();
+      group.add(mesh);
+      group.add(wfMesh);
+      scene.add(group);
 
-    // Side fins
-    for (let i = 0; i < 3; i++) {
-      const finGeo = new THREE.BoxGeometry(0.08, 0.6, 0.5);
-      const finMesh = new THREE.Mesh(finGeo, new THREE.MeshStandardMaterial({
-        color: 0x224466, roughness: 0.4, metalness: 0.5
-      }));
-      finMesh.position.set(-0.72, -0.3 + i * 0.0, 0.0);
-      finMesh.rotation.z = (i - 1) * 0.15;
-      group.add(finMesh);
-    }
+      // Grid below model
+      const gridSize = Math.max(size.x, size.z) * scale * 1.6;
+      const grid = new THREE.GridHelper(gridSize, 16, 0x223344, 0x1a2a38);
+      grid.position.y = -(size.y * scale) / 2 - 2;
+      scene.add(grid);
 
-    // Wireframe overlay for techy look
-    const wfGeo = new THREE.CylinderGeometry(0.305, 0.385, 1.42, 32);
-    const wfMat = new THREE.MeshBasicMaterial({ color: 0x00ccff, wireframe: true, opacity: 0.12, transparent: true });
-    const wfMesh = new THREE.Mesh(wfGeo, wfMat);
-    group.add(wfMesh);
+      // Position camera
+      camera.position.set(0, size.y * scale * 0.5, maxDim * scale * 1.8);
+      camera.lookAt(0, 0, 0);
+      controls.update();
 
-    scene.add(group);
-    sceneRef.current = { renderer, scene, camera, group };
+      let t = 0;
+      let frame;
+      const animate = () => {
+        frame = requestAnimationFrame(animate);
+        t += 0.01;
+        if (rotatingRef.current) group.rotation.y += 0.006;
+        group.position.y = Math.sin(t * 0.6) * 1.5;
+        controls.update();
+        renderer.render(scene, camera);
+      };
+      animate();
 
-    let frame;
-    let t = 0;
-    const animate = () => {
-      frame = requestAnimationFrame(animate);
-      t += 0.01;
-      if (rotating) group.rotation.y += 0.008;
-      group.position.y = Math.sin(t * 0.7) * 0.04;
-      renderer.render(scene, camera);
+      // cleanup stored in outer scope
+      renderer._animFrame = frame;
+      renderer._stopAnim = () => cancelAnimationFrame(frame);
     };
-    animate();
+    reader.readAsArrayBuffer(stlFile);
 
     return () => {
-      cancelAnimationFrame(frame);
+      if (renderer._stopAnim) renderer._stopAnim();
+      controls.dispose();
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-  }, [rotating]);
+  }, [stlFile]);
 
-  return <div ref={mountRef} style={{ width: "100%", height: "100%" }} />;
+  return (
+    <div ref={mountRef} style={{ width: "100%", height: "100%" }}>
+      {!stlFile && (
+        <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center",
+          justifyContent: "center", color: "#1e3a50", fontSize: 11, letterSpacing: 2 }}>
+          NO MODEL LOADED
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── ANIMATED COUNTER ────────────────────────────────────────────────────────
@@ -265,6 +277,7 @@ export default function SmartSliceAI() {
   const [phase, setPhase] = useState("idle"); // idle | uploading | analyzing | done
   const [fileName, setFileName] = useState("");
   const [fileSize, setFileSize] = useState(0);
+  const [stlFile, setStlFile] = useState(null);
   const [stepIdx, setStepIdx] = useState(0);
   const [analysisData, setAnalysisData] = useState(null);
   const [selectedMaterial, setSelectedMaterial] = useState("PLA");
@@ -274,9 +287,10 @@ export default function SmartSliceAI() {
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef();
 
-  const runAnalysis = useCallback((name, size) => {
+  const runAnalysis = useCallback((name, size, file) => {
     setFileName(name);
     setFileSize(size);
+    if (file) setStlFile(file);
     setPhase("uploading");
     setStepIdx(0);
 
@@ -298,7 +312,7 @@ export default function SmartSliceAI() {
 
   const handleFile = (file) => {
     if (!file) return;
-    runAnalysis(file.name, file.size);
+    runAnalysis(file.name, file.size, file);
   };
 
   const handleDrop = (e) => {
@@ -402,7 +416,7 @@ export default function SmartSliceAI() {
                 <div style={{ fontSize: 10, color: "#1e3a50", marginTop: 8, letterSpacing: 1 }}>or click to browse — .stl / .obj supported</div>
                 <div style={{ marginTop: 24, display: "flex", gap: 8 }}>
                   {["bracket.stl","turbine.stl","housing.stl"].map(f => (
-                    <span key={f} onClick={(e) => { e.stopPropagation(); runAnalysis(f, randomInt(80000, 4000000)); }}
+                    <span key={f} onClick={(e) => { e.stopPropagation(); runAnalysis(f, randomInt(80000, 4000000), null); }}
                       style={{ fontSize: 9, color: "#2a6080", border: "1px solid #122030", borderRadius: 4,
                         padding: "4px 10px", cursor: "pointer", letterSpacing: 1, transition: "all 0.2s",
                         background: "#080f18" }}>
@@ -531,7 +545,7 @@ export default function SmartSliceAI() {
                     background: "#060e16", border: "1px solid #0e2030", color: "#3a6080",
                     borderRadius: 4, padding: "4px 12px",
                   }}>{rotating ? "⏸ FREEZE" : "▶ ROTATE"}</button>
-                  <button onClick={() => { setPhase("idle"); setAnalysisData(null); }} style={{
+                  <button onClick={() => { setPhase("idle"); setAnalysisData(null); setStlFile(null); }} style={{
                     fontSize: 9, letterSpacing: 2, cursor: "pointer",
                     background: "rgba(255,136,0,0.1)", border: "1px solid #ff8800", color: "#ff8800",
                     borderRadius: 4, padding: "4px 12px",
@@ -553,7 +567,7 @@ export default function SmartSliceAI() {
                   <div style={{ position: "absolute", bottom: 12, left: 14, fontSize: 8, color: "#1a3a50", letterSpacing: 1, zIndex: 2 }}>
                     PARAMETRIC VISUALIZATION
                   </div>
-                  <ModelViewer analysisData={d} rotating={rotating} />
+                  <ModelViewer stlFile={stlFile} rotating={rotating} />
                 </div>
 
                 {/* Risk + Quality */}
